@@ -3,244 +3,254 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-  <title>搖晃倒水模擬 - 物理波浪版</title>
+  <title>逼真 3D 擬真碗倒水</title>
   <style>
+    * { box-sizing: border-box; }
     body {
       margin: 0;
       padding: 0;
-      background-color: #1a1a1a;
+      background: #0f1015;
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
       min-height: 100vh;
-      color: #fff;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      overflow: hidden;
       touch-action: none;
     }
     #canvas {
-      background: #2a2a2a;
-      border-radius: 16px;
-      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+      background: radial-gradient(circle, #1f232a 0%, #0a0b0e 100%);
+      border-radius: 20px;
+      box-shadow: 0 15px 35px rgba(0,0,0,0.8);
     }
-    .btn-group {
-      margin-top: 20px;
+    .controls {
+      position: absolute;
+      bottom: 25px;
       display: flex;
       gap: 12px;
+      z-index: 10;
     }
     button {
-      padding: 12px 24px;
-      font-size: 16px;
+      padding: 12px 22px;
+      font-size: 15px;
       font-weight: 600;
-      background: #007aff;
       color: #fff;
-      border: none;
-      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.15);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 30px;
       cursor: pointer;
-      transition: opacity 0.2s;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.3);
     }
-    button:active {
-      opacity: 0.8;
-    }
-    #resetBtn {
-      background: #34c759;
-    }
-    #status {
-      margin-top: 12px;
-      font-size: 14px;
-      color: #aaa;
+    button:active { transform: scale(0.95); }
+    #startBtn { background: #007aff; }
+    #info {
+      position: absolute;
+      top: 20px;
+      font-size: 13px;
+      color: #8e8e93;
+      letter-spacing: 0.5px;
     }
   </style>
 </head>
 <body>
 
-  <canvas id="canvas" width="320" height="420"></canvas>
-  <div class="btn-group">
+  <div id="info">傾斜手機感受水流 (Gamma: 0°)</div>
+  <canvas id="canvas" width="340" height="480"></canvas>
+
+  <div class="controls">
     <button id="startBtn">開啟陀螺儀</button>
-    <button id="resetBtn">重新倒水</button>
+    <button id="resetBtn">裝滿水</button>
   </div>
-  <div id="status">傾斜角度 (Gamma): 0°</div>
 
   <script>
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d');
     const startBtn = document.getElementById('startBtn');
     const resetBtn = document.getElementById('resetBtn');
-    const statusText = document.getElementById('status');
+    const info = document.getElementById('info');
 
-    // 碗的配置
+    // 全局狀態
+    let gamma = 0; // 左右傾斜
+    let beta = 0;  // 前後傾斜
+    let smoothedGamma = 0;
+    let particles = [];
+    const NUM_PARTICLES = 120; // 水粒子數量
+
+    // 碗的幾何參數
     const bowl = {
-      x: 160,
-      y: 290,
-      radiusX: 130,
-      radiusY: 100,
-      spillThreshold: 35 // 傾斜超過 35 度視為倒瀉
+      x: 170,
+      y: 260,
+      width: 140,
+      height: 90,
+      rimY: -45 // 碗口相對 Y 軸
     };
-
-    // 狀態變數
-    let currentGamma = 0;
-    let previousGamma = 0;
-    let isSpilled = false;
-
-    // 水面波動物理變數
-    let waveOffset = 0;       // 正弦波相位變化（讓波浪流動）
-    let waveAmplitude = 0;    // 當前波浪振幅（高度）
-    let waveVelocity = 0;     // 振幅變化速度
-    const damping = 0.95;     // 阻尼係數（水面逐漸平靜）
-    const tension = 0.08;     // 彈力係數（拉回基準線）
 
     // 啟動陀螺儀權限
     startBtn.addEventListener('click', async () => {
       if (typeof DeviceOrientationEvent !== 'undefined' && 
           typeof DeviceOrientationEvent.requestPermission === 'function') {
         try {
-          const permission = await DeviceOrientationEvent.requestPermission();
-          if (permission === 'granted') {
-            window.addEventListener('deviceorientation', handleOrientation);
+          const res = await DeviceOrientationEvent.requestPermission();
+          if (res === 'granted') {
+            window.addEventListener('deviceorientation', handleMotion);
             startBtn.style.display = 'none';
-          } else {
-            alert('需授權陀螺儀才能運作');
           }
-        } catch (e) {
-          console.error(e);
-        }
+        } catch (e) { console.error(e); }
       } else {
-        window.addEventListener('deviceorientation', handleOrientation);
+        window.addEventListener('deviceorientation', handleMotion);
         startBtn.style.display = 'none';
       }
     });
 
-    // 重置按鈕邏輯
-    resetBtn.addEventListener('click', () => {
-      isSpilled = false;
-      waveAmplitude = 0;
-      waveVelocity = 0;
-    });
+    resetBtn.addEventListener('click', initWater);
 
-    function handleOrientation(event) {
-      if (event.gamma !== null) {
-        currentGamma = event.gamma;
-        
-        // 根據角速度（搖晃程度）注入能量到水面波浪
-        const deltaGamma = currentGamma - previousGamma;
-        waveVelocity += deltaGamma * 0.4;
-        
-        previousGamma = currentGamma;
-        statusText.innerText = `傾斜角度 (Gamma): ${Math.round(currentGamma)}°`;
+    function handleMotion(e) {
+      if (e.gamma !== null) gamma = e.gamma;
+      if (e.beta !== null) beta = e.beta;
+    }
+
+    // 初始化水粒子
+    function initWater() {
+      particles = [];
+      for (let i = 0; i < NUM_PARTICLES; i++) {
+        particles.push({
+          x: bowl.x + (Math.random() - 0.5) * (bowl.width * 0.8),
+          y: bowl.y + Math.random() * (bowl.height * 0.5),
+          vx: 0,
+          vy: 0,
+          radius: 7 + Math.random() * 4,
+          isSpilled: false
+        });
       }
     }
 
-    function updatePhysics() {
-      // 簡單簡諧運動與阻尼模擬 (Spring-Damper system)
-      const force = -tension * waveAmplitude;
-      waveVelocity += force;
-      waveVelocity *= damping;
-      waveAmplitude += waveVelocity;
-
-      // 限制最大波浪振幅，避免穿幫
-      waveAmplitude = Math.max(-25, Math.min(25, waveAmplitude));
-
-      // 讓波浪相位持續向前推進
-      waveOffset += 0.15;
-    }
-
-    function draw() {
-      updatePhysics();
+    // 物理與渲染主循環
+    function animate() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      // 判斷是否倒瀉
-      if (Math.abs(currentGamma) > bowl.spillThreshold) {
-        isSpilled = true;
+      // 平滑化陀螺儀數據（防震抖）
+      smoothedGamma += (gamma - smoothedGamma) * 0.1;
+      info.innerText = `傾斜角度 (Gamma: ${Math.round(smoothedGamma)}°)`;
+
+      // 算重力方向
+      const rad = (smoothedGamma * Math.PI) / 180;
+      const gx = Math.sin(rad) * 0.6; // 橫向重力
+      const gy = Math.cos(rad) * 0.6; // 縱向重力
+
+      ctx.save();
+      
+      // --- 1. 繪製隨手機轉動的【3D 碗】 ---
+      ctx.translate(bowl.x, bowl.y);
+      ctx.rotate(rad * 0.3); // 碗隨傾斜微微旋轉，增加立體感
+
+      // 碗陰影
+      ctx.beginPath();
+      ctx.ellipse(0, bowl.height / 2 + 15, bowl.width * 0.7, 15, 0, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(0,0,0,0.4)';
+      ctx.fill();
+
+      // 碗背壁 (內側暗部)
+      ctx.beginPath();
+      ctx.ellipse(0, 0, bowl.width, bowl.height, 0, 0, Math.PI);
+      ctx.fillStyle = '#1c1d22';
+      ctx.fill();
+
+      ctx.restore();
+
+      // --- 2. 物理粒子模擬 (流體水滴) ---
+      for (let p of particles) {
+        if (!p.isSpilled) {
+          // 受重力影響
+          p.vx += gx;
+          p.vy += gy;
+
+          // 阻尼空氣阻力
+          p.vx *= 0.96;
+          p.vy *= 0.96;
+
+          p.x += p.vx;
+          p.y += p.vy;
+
+          // 碗壁碰撞檢測（以橢圓公式計算）
+          const dx = p.x - bowl.x;
+          const dy = p.y - bowl.y;
+          const dist = (dx * dx) / (bowl.width * bowl.width) + (dy * dy) / (bowl.height * bowl.height);
+
+          // 粒子撞到碗底/碗壁反彈
+          if (dist > 0.75 && dy > bowl.rimY) {
+            const angle = Math.atan2(dy, dx);
+            p.x = bowl.x + Math.cos(angle) * bowl.width * 0.85;
+            p.y = bowl.y + Math.sin(angle) * bowl.height * 0.85;
+            p.vx *= -0.3;
+            p.vy *= -0.3;
+          }
+
+          // 判定是否從碗口瀉出（超出了碗口左右邊緣且高於碗口）
+          if (dy < bowl.rimY || Math.abs(dx) > bowl.width * 0.9) {
+            if (Math.abs(smoothedGamma) > 22) { // 傾斜角度大於 22 度溢出
+              p.isSpilled = true;
+            }
+          }
+        } else {
+          // 倒瀉後自由落體
+          p.vx += gx * 1.5;
+          p.vy += 0.8; // 常規重力下落
+          p.x += p.vx;
+          p.y += p.vy;
+        }
       }
 
-      // 1. 繪製碗主體與邊框
+      // --- 3. 繪製真實液體質感 (Metaball / 融球渲染) ---
+      // 先繪製高對比度的水粒子
+      ctx.save();
+      for (let p of particles) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+        
+        // 藍色流體高光漸層
+        const grad = ctx.createRadialGradient(p.x - 2, p.y - 2, 1, p.x, p.y, p.radius);
+        grad.addColorStop(0, '#73d5ff');
+        grad.addColorStop(0.6, '#0088ff');
+        grad.addColorStop(1, 'rgba(0, 85, 255, 0.8)');
+        
+        ctx.fillStyle = grad;
+        ctx.fill();
+      }
+      ctx.restore();
+
+      // --- 4. 繪製碗前壁 (遮擋水滴，形成「水在碗裡面」的效果) ---
+      ctx.save();
+      ctx.translate(bowl.x, bowl.y);
+      ctx.rotate(rad * 0.3);
+
+      // 碗外壁陶瓷質感
       ctx.beginPath();
-      ctx.ellipse(bowl.x, bowl.y, bowl.radiusX, bowl.radiusY, 0, 0, Math.PI);
-      ctx.fillStyle = '#3a3a3c';
+      ctx.ellipse(0, 0, bowl.width, bowl.height, 0, 0, Math.PI);
+      const bowlGrad = ctx.createLinearGradient(-bowl.width, 0, bowl.width, bowl.height);
+      bowlGrad.addColorStop(0, '#4a4d57');
+      bowlGrad.addColorStop(0.5, '#2b2c33');
+      bowlGrad.addColorStop(1, '#18191d');
+      ctx.fillStyle = bowlGrad;
       ctx.fill();
-      ctx.lineWidth = 5;
-      ctx.strokeStyle = '#636366';
+
+      // 碗口高光外圈
+      ctx.beginPath();
+      ctx.ellipse(0, bowl.rimY, bowl.width, 18, 0, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+      ctx.lineWidth = 3;
       ctx.stroke();
 
-      // 2. 繪製水面
-      if (!isSpilled) {
-        ctx.save();
-        
-        // 裁剪區域：限制水只在碗內顯示
-        ctx.beginPath();
-        ctx.ellipse(bowl.x, bowl.y, bowl.radiusX - 4, bowl.radiusY - 4, 0, 0, Math.PI);
-        ctx.clip();
+      ctx.restore();
 
-        // 水面基準高度與傾斜弧度
-        const tiltRad = (currentGamma * Math.PI) / 180;
-        const waterBaseY = bowl.y - 15;
-
-        const leftX = bowl.x - bowl.radiusX;
-        const rightX = bowl.x + bowl.radiusX;
-        const width = rightX - leftX;
-
-        ctx.beginPath();
-        
-        // 使用多個採樣點繪製帶有動態正弦波的水面曲線
-        const segments = 40;
-        for (let i = 0; i <= segments; i++) {
-          const percent = i / segments;
-          const x = leftX + width * percent;
-
-          // 基本傾斜高度（根據 Gamma 算出的直線水面）
-          const tiltY = waterBaseY + Math.tan(tiltRad) * (x - bowl.x);
-
-          //疊加波動效果：結合正弦波與搖晃能量 (waveAmplitude)
-          const waveY = Math.sin(percent * Math.PI * 3 + waveOffset) * waveAmplitude;
-
-          const y = tiltY + waveY;
-
-          if (i === 0) {
-            ctx.moveTo(x, y);
-          } else {
-            ctx.lineTo(x, y);
-          }
-        }
-
-        // 封閉水面多邊形並填色
-        ctx.lineTo(rightX, bowl.y + bowl.radiusY);
-        ctx.lineTo(leftX, bowl.y + bowl.radiusY);
-        ctx.closePath();
-
-        // 漸層水色
-        const gradient = ctx.createLinearGradient(0, bowl.y - 50, 0, bowl.y + bowl.radiusY);
-        gradient.addColorStop(0, 'rgba(52, 199, 89, 0.85)'); // 水面淺藍綠色
-        gradient.addColorStop(1, 'rgba(0, 122, 255, 0.85)'); // 深水區域
-        ctx.fillStyle = gradient;
-        ctx.fill();
-
-        ctx.restore();
-      } else {
-        // 3. 倒瀉狀態繪製
-        ctx.fillStyle = 'rgba(0, 122, 255, 0.8)';
-        if (currentGamma > 0) {
-          // 向右傾瀉水流
-          ctx.beginPath();
-          ctx.ellipse(bowl.x + 90, bowl.y + 40, 50, 18, 0.5, 0, Math.PI * 2);
-          ctx.fill();
-        } else {
-          // 向左傾瀉水流
-          ctx.beginPath();
-          ctx.ellipse(bowl.x - 90, bowl.y + 40, 50, 18, -0.5, 0, Math.PI * 2);
-          ctx.fill();
-        }
-
-        // 提示文字
-        ctx.fillStyle = '#ff453a';
-        ctx.font = 'bold 22px -apple-system, sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText('水倒瀉咗！', bowl.x, bowl.y - 80);
-      }
-
-      requestAnimationFrame(draw);
+      requestAnimationFrame(animate);
     }
 
-    draw();
+    // 初始化並啟動
+    initWater();
+    animate();
   </script>
 </body>
-  </html>
+</html>
