@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-  <title>極真滿水碗物理模擬</title>
+  <title>極真滿水碗 - 動態波浪版</title>
   <style>
     * { box-sizing: border-box; }
     body {
@@ -81,21 +81,27 @@
     const angleText = document.getElementById('angleText');
     const waterLevelText = document.getElementById('waterLevel');
 
-    let gamma = 0; // 手機左右傾斜角
+    let gamma = 0; 
+    let previousGamma = 0;
     let smoothedGamma = 0;
 
-    // 碗的幾何參數 (以 Canvas 中心為基準)
+    // 水面波浪物理參數
+    let wavePhase = 0;        // 正弦波相位
+    let waveAmplitude = 0;    // 波浪振幅 (高度)
+    let waveVelocity = 0;     // 波浪注入能量/速度
+    const damping = 0.94;     // 阻尼 (讓波浪隨時間消散)
+    const tension = 0.08;     // 彈性 (拉回水平線)
+
     const bowl = {
       x: 170,
       y: 260,
-      radiusX: 120, // 碗口半寬
-      radiusY: 80,  // 碗半高
-      rimY: -35     // 碗口頂端相對 Y 軸
+      radiusX: 110,
+      radiusY: 75,
+      rimY: -30
     };
 
-    // 容積狀態
-    let maxWaterLevel = 1.0; // 當前最大水量比例 (1.0 = 滿水)
-    let drops = []; // 溢出的水滴粒子
+    let waterVolume = 1.0;
+    let drops = [];
 
     // 陀螺儀授權
     startBtn.addEventListener('click', async () => {
@@ -104,169 +110,218 @@
         try {
           const res = await DeviceOrientationEvent.requestPermission();
           if (res === 'granted') {
-            window.addEventListener('deviceorientation', e => { if (e.gamma !== null) gamma = e.gamma; });
+            window.addEventListener('deviceorientation', handleOrientation);
             startBtn.style.display = 'none';
           }
         } catch (e) { console.error(e); }
       } else {
-        window.addEventListener('deviceorientation', e => { if (e.gamma !== null) gamma = e.gamma; });
+        window.addEventListener('deviceorientation', handleOrientation);
         startBtn.style.display = 'none';
       }
     });
 
-    // 重新加滿水
     resetBtn.addEventListener('click', () => {
-      maxWaterLevel = 1.0;
+      waterVolume = 1.0;
       drops = [];
+      waveAmplitude = 0;
+      waveVelocity = 0;
     });
 
+    function handleOrientation(e) {
+      if (e.gamma !== null) {
+        gamma = e.gamma;
+        
+        // 計算晃動角速度，將晃動力道轉化為波浪能量
+        const deltaGamma = gamma - previousGamma;
+        waveVelocity += deltaGamma * 0.45;
+        previousGamma = gamma;
+      }
+    }
+
+    function updateWavePhysics() {
+      // 簡諧運動與阻尼計算
+      const force = -tension * waveAmplitude;
+      waveVelocity += force;
+      waveVelocity *= damping;
+      waveAmplitude += waveVelocity;
+
+      // 限制波浪最大震幅
+      waveAmplitude = Math.max(-18, Math.min(18, waveAmplitude));
+
+      // 波浪推進
+      wavePhase += 0.18;
+    }
+
     function animate() {
+      updateWavePhysics();
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      // 平滑化角度（防震手）
       smoothedGamma += (gamma - smoothedGamma) * 0.15;
-      const rad = (smoothedGamma * Math.PI) / 180; // 傾斜弧度
+      const rad = (smoothedGamma * Math.PI) / 180;
 
       angleText.innerText = `${Math.round(smoothedGamma)}°`;
 
       // -------------------------------------------------------------
-      // 1. 幾何物理計算：當前傾斜角度下的「最大可裝水量」
+      // 1. 物理容積計算 (考慮角度與強烈波浪帶來的額外溢出)
       // -------------------------------------------------------------
-      // 當碗傾斜 angle 時， lowest rim (最低碗口邊緣) 會下降。
-      // 溢出極限由傾斜角決定：角度越大，容量越小
-      const absAngle = Math.abs(smoothedGamma);
-      
-      // 計算傾斜後的容積上限 (幾何公式簡化)
-      // 傾斜 0 度容量 1.0，傾斜超過 45 度水幾乎全部瀉光
-      let capacityLimit = Math.max(0, 1.0 - Math.sin(Math.abs(rad)) * 1.6);
+      const waveSpillImpact = Math.abs(waveAmplitude) * 0.008;
+      const maxAllowedVolume = Math.max(0, 1.0 - Math.sin(Math.abs(rad)) * 1.5 - waveSpillImpact);
 
-      // 如果當前容量上限低於當前水量，發生「倒瀉水」！
-      if (capacityLimit < maxWaterLevel) {
-        const spillAmount = maxWaterLevel - capacityLimit;
-        maxWaterLevel = capacityLimit; // 水量永久減少！
+      if (maxAllowedVolume < waterVolume) {
+        const overflow = waterVolume - maxAllowedVolume;
+        waterVolume = maxAllowedVolume;
 
-        // 產生倒瀉出去的水滴粒子
-        if (spillAmount > 0.001) {
-          const spillSide = smoothedGamma > 0 ? 1 : -1; // 往左還是往右瀉
+        if (overflow > 0.002) {
+          const spillSide = (smoothedGamma + waveVelocity) > 0 ? 1 : -1;
           const lipX = bowl.x + spillSide * bowl.radiusX * Math.cos(rad);
-          const lipY = bowl.y + bowl.rimY + spillSide * bowl.radiusX * Math.sin(rad);
+          const lipY = bowl.y + bowl.rimY * Math.cos(rad) + spillSide * bowl.radiusX * Math.sin(rad);
 
-          for (let i = 0; i < 3; i++) {
+          for (let i = 0; i < 2; i++) {
             drops.push({
-              x: lipX + (Math.random() - 0.5) * 10,
+              x: lipX + (Math.random() - 0.5) * 6,
               y: lipY,
-              vx: spillSide * (2 + Math.random() * 3),
-              vy: -1 + Math.random() * 2,
-              radius: 3 + Math.random() * 4
+              vx: spillSide * (1.5 + Math.random() * 2),
+              vy: -0.5 + Math.random() * 1.5,
+              radius: 3 + Math.random() * 3
             });
           }
         }
       }
 
-      waterLevelText.innerText = `${Math.round(maxWaterLevel * 100)}%`;
+      waterLevelText.innerText = `${Math.round(waterVolume * 100)}%`;
 
       // -------------------------------------------------------------
-      // 2. 繪製隨手機 1:1 傾斜的碗底與內壁
+      // 2. 繪製碗背壁
       // -------------------------------------------------------------
       ctx.save();
       ctx.translate(bowl.x, bowl.y);
-      ctx.rotate(rad); // 碗完全隨手機角度旋轉！
+      ctx.rotate(rad);
 
-      // 碗內壁 (暗色背板)
       ctx.beginPath();
       ctx.ellipse(0, 0, bowl.radiusX, bowl.radiusY, 0, 0, Math.PI);
-      ctx.fillStyle = '#18191e';
+      ctx.fillStyle = '#141519';
       ctx.fill();
 
       ctx.restore();
 
       // -------------------------------------------------------------
-      // 3. 繪製水平的水面（物理裁剪）
+      // 3. 繪製碗內波浪水體（精確裁切在碗內）
       // -------------------------------------------------------------
-      ctx.save();
-      
-      // 先將繪製區域裁剪為「旋轉後的碗的內部」
-      ctx.save();
-      ctx.translate(bowl.x, bowl.y);
-      ctx.rotate(rad);
-      ctx.beginPath();
-      ctx.ellipse(0, 0, bowl.radiusX - 3, bowl.radiusY - 3, 0, 0, Math.PI);
-      ctx.clip();
-      ctx.restore();
+      if (waterVolume > 0.005) {
+        ctx.save();
 
-      // 在碗內部繪製「永遠保持水平」的水
-      if (maxWaterLevel > 0.01) {
+        // 裁切區域：打斜後的碗內壁
+        ctx.translate(bowl.x, bowl.y);
+        ctx.rotate(rad);
+
         ctx.beginPath();
+        ctx.ellipse(0, 0, bowl.radiusX - 2, bowl.radiusY - 2, 0, 0, Math.PI);
+        ctx.clip();
 
-        // 根據剩餘水量比例計算水面高度 (未傾斜時的 Y 軸)
-        const waterHeight = bowl.rimY + (1 - maxWaterLevel) * (bowl.radiusY - bowl.rimY);
+        // 切回世界座標系繪製動態波浪水面
+        ctx.rotate(-rad);
+        ctx.translate(-bowl.x, -bowl.y);
 
-        // 由於 Context 已被 Clip 在碗內，這裡直接畫一個水平矩形填滿水
-        // 矩形覆蓋整個碗底部
-        ctx.rect(0, bowl.y + waterHeight, canvas.width, canvas.height);
+        const currentWaterDepth = (1 - waterVolume) * (bowl.radiusY - bowl.rimY);
+        const lowestLipOffsetY = Math.sin(Math.abs(rad)) * bowl.radiusX;
+        const baseWaterY = bowl.y + bowl.rimY + currentWaterDepth + (smoothedGamma !== 0 ? lowestLipOffsetY * 0.5 : 0);
 
-        // 水體藍色漸層
-        const grad = ctx.createLinearGradient(0, bowl.y + bowl.rimY, 0, bowl.y + bowl.radiusY);
-        grad.addColorStop(0, 'rgba(52, 199, 89, 0.9)');  // 頂層清澈綠藍色
-        grad.addColorStop(1, 'rgba(0, 122, 255, 0.95)'); // 底層深藍色
-        ctx.fillStyle = grad;
+        // 多點繪製帶波浪的正弦水面
+        const segments = 30;
+        const startX = 0;
+        const endX = canvas.width;
+        const step = (endX - startX) / segments;
+
+        ctx.beginPath();
+        ctx.moveTo(startX, canvas.height);
+
+        for (let i = 0; i <= segments; i++) {
+          const x = startX + i * step;
+          const progress = i / segments;
+          
+          // 正弦波波浪高低 offset
+          const waveY = Math.sin(progress * Math.PI * 2.5 + wavePhase) * waveAmplitude;
+          const y = baseWaterY + waveY;
+
+          if (i === 0) {
+            ctx.lineTo(x, y);
+          } else {
+            ctx.lineTo(x, y);
+          }
+        }
+
+        ctx.lineTo(endX, canvas.height);
+        ctx.closePath();
+
+        // 漸層水體顏色
+        const waterGrad = ctx.createLinearGradient(0, bowl.y - bowl.radiusY, 0, bowl.y + bowl.radiusY);
+        waterGrad.addColorStop(0, 'rgba(0, 165, 255, 0.85)');
+        waterGrad.addColorStop(1, 'rgba(0, 75, 190, 0.95)');
+        ctx.fillStyle = waterGrad;
         ctx.fill();
 
-        // 繪製頂層水平水面的高光白線
+        // 波浪頂部的高光白色水線
         ctx.beginPath();
-        ctx.moveTo(0, bowl.y + waterHeight);
-        ctx.lineTo(canvas.width, bowl.y + waterHeight);
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
-        ctx.lineWidth = 2;
+        for (let i = 0; i <= segments; i++) {
+          const x = startX + i * step;
+          const progress = i / segments;
+          const waveY = Math.sin(progress * Math.PI * 2.5 + wavePhase) * waveAmplitude;
+          const y = baseWaterY + waveY;
+
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.75)';
+        ctx.lineWidth = 2.5;
         ctx.stroke();
+
+        ctx.restore();
       }
 
-      ctx.restore();
-
       // -------------------------------------------------------------
-      // 4. 繪製碗的前壁 (遮擋水) 與碗邊框
+      // 4. 繪製碗前壁 (陶瓷材質)
       // -------------------------------------------------------------
       ctx.save();
       ctx.translate(bowl.x, bowl.y);
       ctx.rotate(rad);
 
-      // 碗的外壁
       ctx.beginPath();
       ctx.ellipse(0, 0, bowl.radiusX, bowl.radiusY, 0, 0, Math.PI);
+      
       const bowlGrad = ctx.createLinearGradient(-bowl.radiusX, 0, bowl.radiusX, bowl.radiusY);
-      bowlGrad.addColorStop(0, '#3a3d45');
-      bowlGrad.addColorStop(0.5, '#23252b');
+      bowlGrad.addColorStop(0, '#383b42');
+      bowlGrad.addColorStop(0.5, '#212328');
       bowlGrad.addColorStop(1, '#111215');
       ctx.fillStyle = bowlGrad;
       ctx.fill();
+      
       ctx.lineWidth = 3;
-      ctx.strokeStyle = '#555861';
+      ctx.strokeStyle = '#4f525b';
       ctx.stroke();
 
-      // 碗口高光圓圈
+      // 碗口邊圈
       ctx.beginPath();
-      ctx.ellipse(0, bowl.rimY, bowl.radiusX, 12, 0, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
+      ctx.ellipse(0, bowl.rimY, bowl.radiusX, 10, 0, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
       ctx.lineWidth = 2;
       ctx.stroke();
 
       ctx.restore();
 
       // -------------------------------------------------------------
-      // 5. 繪製並更新飛濺出去的水滴粒子
+      // 5. 水滴粒子
       // -------------------------------------------------------------
       for (let i = drops.length - 1; i >= 0; i--) {
         let d = drops[i];
-        d.vy += 0.4; // 常規重力加速度
+        d.vy += 0.35;
         d.x += d.vx;
         d.y += d.vy;
 
         ctx.beginPath();
         ctx.arc(d.x, d.y, d.radius, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(52, 199, 89, 0.8)';
+        ctx.fillStyle = 'rgba(0, 160, 255, 0.85)';
         ctx.fill();
 
-        // 掉出螢幕外自動清除
         if (d.y > canvas.height) {
           drops.splice(i, 1);
         }
