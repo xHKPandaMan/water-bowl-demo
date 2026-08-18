@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>搖晃倒水模擬 - 物理波浪版</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #1a1a1a;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      touch-action: none;
+    }
+    #canvas {
+      background: #2a2a2a;
+      border-radius: 16px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    }
+    .btn-group {
+      margin-top: 20px;
+      display: flex;
+      gap: 12px;
+    }
+    button {
+      padding: 12px 24px;
+      font-size: 16px;
+      font-weight: 600;
+      background: #007aff;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    button:active {
+      opacity: 0.8;
+    }
+    #resetBtn {
+      background: #34c759;
+    }
+    #status {
+      margin-top: 12px;
+      font-size: 14px;
+      color: #aaa;
+    }
+  </style>
+</head>
+<body>
+
+  <canvas id="canvas" width="320" height="420"></canvas>
+  <div class="btn-group">
+    <button id="startBtn">開啟陀螺儀</button>
+    <button id="resetBtn">重新倒水</button>
+  </div>
+  <div id="status">傾斜角度 (Gamma): 0°</div>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const startBtn = document.getElementById('startBtn');
+    const resetBtn = document.getElementById('resetBtn');
+    const statusText = document.getElementById('status');
+
+    // 碗的配置
+    const bowl = {
+      x: 160,
+      y: 290,
+      radiusX: 130,
+      radiusY: 100,
+      spillThreshold: 35 // 傾斜超過 35 度視為倒瀉
+    };
+
+    // 狀態變數
+    let currentGamma = 0;
+    let previousGamma = 0;
+    let isSpilled = false;
+
+    // 水面波動物理變數
+    let waveOffset = 0;       // 正弦波相位變化（讓波浪流動）
+    let waveAmplitude = 0;    // 當前波浪振幅（高度）
+    let waveVelocity = 0;     // 振幅變化速度
+    const damping = 0.95;     // 阻尼係數（水面逐漸平靜）
+    const tension = 0.08;     // 彈力係數（拉回基準線）
+
+    // 啟動陀螺儀權限
+    startBtn.addEventListener('click', async () => {
+      if (typeof DeviceOrientationEvent !== 'undefined' && 
+          typeof DeviceOrientationEvent.requestPermission === 'function') {
+        try {
+          const permission = await DeviceOrientationEvent.requestPermission();
+          if (permission === 'granted') {
+            window.addEventListener('deviceorientation', handleOrientation);
+            startBtn.style.display = 'none';
+          } else {
+            alert('需授權陀螺儀才能運作');
+          }
+        } catch (e) {
+          console.error(e);
+        }
+      } else {
+        window.addEventListener('deviceorientation', handleOrientation);
+        startBtn.style.display = 'none';
+      }
+    });
+
+    // 重置按鈕邏輯
+    resetBtn.addEventListener('click', () => {
+      isSpilled = false;
+      waveAmplitude = 0;
+      waveVelocity = 0;
+    });
+
+    function handleOrientation(event) {
+      if (event.gamma !== null) {
+        currentGamma = event.gamma;
+        
+        // 根據角速度（搖晃程度）注入能量到水面波浪
+        const deltaGamma = currentGamma - previousGamma;
+        waveVelocity += deltaGamma * 0.4;
+        
+        previousGamma = currentGamma;
+        statusText.innerText = `傾斜角度 (Gamma): ${Math.round(currentGamma)}°`;
+      }
+    }
+
+    function updatePhysics() {
+      // 簡單簡諧運動與阻尼模擬 (Spring-Damper system)
+      const force = -tension * waveAmplitude;
+      waveVelocity += force;
+      waveVelocity *= damping;
+      waveAmplitude += waveVelocity;
+
+      // 限制最大波浪振幅，避免穿幫
+      waveAmplitude = Math.max(-25, Math.min(25, waveAmplitude));
+
+      // 讓波浪相位持續向前推進
+      waveOffset += 0.15;
+    }
+
+    function draw() {
+      updatePhysics();
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // 判斷是否倒瀉
+      if (Math.abs(currentGamma) > bowl.spillThreshold) {
+        isSpilled = true;
+      }
+
+      // 1. 繪製碗主體與邊框
+      ctx.beginPath();
+      ctx.ellipse(bowl.x, bowl.y, bowl.radiusX, bowl.radiusY, 0, 0, Math.PI);
+      ctx.fillStyle = '#3a3a3c';
+      ctx.fill();
+      ctx.lineWidth = 5;
+      ctx.strokeStyle = '#636366';
+      ctx.stroke();
+
+      // 2. 繪製水面
+      if (!isSpilled) {
+        ctx.save();
+        
+        // 裁剪區域：限制水只在碗內顯示
+        ctx.beginPath();
+        ctx.ellipse(bowl.x, bowl.y, bowl.radiusX - 4, bowl.radiusY - 4, 0, 0, Math.PI);
+        ctx.clip();
+
+        // 水面基準高度與傾斜弧度
+        const tiltRad = (currentGamma * Math.PI) / 180;
+        const waterBaseY = bowl.y - 15;
+
+        const leftX = bowl.x - bowl.radiusX;
+        const rightX = bowl.x + bowl.radiusX;
+        const width = rightX - leftX;
+
+        ctx.beginPath();
+        
+        // 使用多個採樣點繪製帶有動態正弦波的水面曲線
+        const segments = 40;
+        for (let i = 0; i <= segments; i++) {
+          const percent = i / segments;
+          const x = leftX + width * percent;
+
+          // 基本傾斜高度（根據 Gamma 算出的直線水面）
+          const tiltY = waterBaseY + Math.tan(tiltRad) * (x - bowl.x);
+
+          //疊加波動效果：結合正弦波與搖晃能量 (waveAmplitude)
+          const waveY = Math.sin(percent * Math.PI * 3 + waveOffset) * waveAmplitude;
+
+          const y = tiltY + waveY;
+
+          if (i === 0) {
+            ctx.moveTo(x, y);
+          } else {
+            ctx.lineTo(x, y);
+          }
+        }
+
+        // 封閉水面多邊形並填色
+        ctx.lineTo(rightX, bowl.y + bowl.radiusY);
+        ctx.lineTo(leftX, bowl.y + bowl.radiusY);
+        ctx.closePath();
+
+        // 漸層水色
+        const gradient = ctx.createLinearGradient(0, bowl.y - 50, 0, bowl.y + bowl.radiusY);
+        gradient.addColorStop(0, 'rgba(52, 199, 89, 0.85)'); // 水面淺藍綠色
+        gradient.addColorStop(1, 'rgba(0, 122, 255, 0.85)'); // 深水區域
+        ctx.fillStyle = gradient;
+        ctx.fill();
+
+        ctx.restore();
+      } else {
+        // 3. 倒瀉狀態繪製
+        ctx.fillStyle = 'rgba(0, 122, 255, 0.8)';
+        if (currentGamma > 0) {
+          // 向右傾瀉水流
+          ctx.beginPath();
+          ctx.ellipse(bowl.x + 90, bowl.y + 40, 50, 18, 0.5, 0, Math.PI * 2);
+          ctx.fill();
+        } else {
+          // 向左傾瀉水流
+          ctx.beginPath();
+          ctx.ellipse(bowl.x - 90, bowl.y + 40, 50, 18, -0.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        // 提示文字
+        ctx.fillStyle = '#ff453a';
+        ctx.font = 'bold 22px -apple-system, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('水倒瀉咗！', bowl.x, bowl.y - 80);
+      }
+
+      requestAnimationFrame(draw);
+    }
+
+    draw();
+  </script>
+</body>
+  </html>
